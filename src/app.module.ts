@@ -5,6 +5,7 @@ import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { CrawlerModule } from './crawler/crawler.module';
 import { StoryModule } from './story/story.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -12,6 +13,7 @@ import { StoryModule } from './story/story.module';
     PrismaModule,
     CrawlerModule,
     StoryModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
