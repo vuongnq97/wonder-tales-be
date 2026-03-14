@@ -1,18 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI } from '@google/genai';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AiService {
     private readonly logger = new Logger(AiService.name);
-    private readonly ai: GoogleGenAI;
+    private ai: GoogleGenAI | null = null;
 
-    constructor(private readonly prisma: PrismaService) {
-        const apiKey = process.env.GEMINI_API_KEY;
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly config: ConfigService,
+    ) {
+        const apiKey = this.config.get<string>('GEMINI_API_KEY');
         if (!apiKey) {
             this.logger.warn('GEMINI_API_KEY not set — AI features disabled');
+        } else {
+            this.ai = new GoogleGenAI({ apiKey });
+            this.logger.log('Gemini AI initialized');
         }
-        this.ai = new GoogleGenAI({ apiKey: apiKey || '' });
     }
 
     private stripHtml(html: string): string {
@@ -34,6 +40,8 @@ export class AiService {
     }
 
     async summarize(slug: string): Promise<{ summary: string; moral: string }> {
+        if (!this.ai) throw new Error('AI not configured. Set GEMINI_API_KEY.');
+
         const { title, text } = await this.getStoryContent(slug);
         const truncated = text.substring(0, 8000);
 
@@ -70,6 +78,8 @@ Trả về JSON theo format sau (KHÔNG markdown, chỉ JSON thuần):
             correctAnswer: number;
         }>;
     }> {
+        if (!this.ai) throw new Error('AI not configured. Set GEMINI_API_KEY.');
+
         const { title, text } = await this.getStoryContent(slug);
         const truncated = text.substring(0, 8000);
 
