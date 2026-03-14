@@ -32,5 +32,59 @@
             "danh-muc",
             "tag/"
         ]
+    },
+    {
+        "domain": "cotichvietnam.org",
+        "name": "Cổ Tích Việt Nam Org",
+        "baseUrl": "https://cotichvietnam.org",
+        "categories": [
+            {
+                "name": "Truyện cổ tích dân gian",
+                "slug": "truyen-co-tich-dan-gian",
+                "url": "https://cotichvietnam.org/tag/truyen-co-tich-dan-gian"
+            },
+            {
+                "name": "Truyện cổ Grimm",
+                "slug": "truyen-co-grimm",
+                "url": "https://cotichvietnam.org/tag/truyen-co-grimm"
+            },
+            {
+                "name": "Truyện cổ tích Andersen",
+                "slug": "truyen-co-tich-andersen",
+                "url": "https://cotichvietnam.org/tag/truyen-co-anderson"
+            },
+            {
+                "name": "Thần thoại Hy Lạp",
+                "slug": "than-thoai-hy-lap",
+                "url": "https://cotichvietnam.org/tag/than-thoai-hy-lap"
+            },
+            {
+                "name": "Truyện ngụ ngôn",
+                "slug": "truyen-ngu-ngon",
+                "url": "https://cotichvietnam.org/tag/truyen-ngu-ngon"
+            },
+            {
+                "name": "Cổ tích cho bé",
+                "slug": "co-tich-cho-be",
+                "url": "https://cotichvietnam.org/tag/co-tich-cho-be"
+            }
+        ],
+        "selectors": {
+            "storyLinks": "h3.jeg_post_title a, h2 a, .entry-title a, .jeg_post_title a",
+            "storyLinksFallback": "article a[href$='.html']",
+            "pagination": "a.page_nav_next, a.next, a[rel='next'], .nav-links a.next",
+            "paginationOlder": ".jeg_block_nav a.next, .jeg_block_navigation a.next, .navigation a[rel='next']",
+            "title": "h1.jeg_post_title, h1.entry-title, h1",
+            "content": ".entry-content, .content-inner",
+            "thumbnail": "meta[property='og:image']",
+            "tags": ".jeg_post_tags a, .post-tags a, a[rel='tag']",
+            "removeFromContent": "script, style, .social-share, .post-tags, .related-posts, .comments, .navigation, ins, .adsbygoogle, .jeg_share_button, .jeg_post_tags, .jnews_inline_related_post"
+        },
+        "storyUrlPattern": ".html",
+        "storyUrlExclude": [
+            "tag/",
+            "category/",
+            "/page/"
+        ]
     }
 ]
