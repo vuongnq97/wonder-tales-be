@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI } from '@google/genai';
 import { PrismaService } from '../prisma/prisma.service';
@@ -35,19 +35,71 @@ export class AiService {
 
     private async getStoryContent(slug: string): Promise<{ title: string; text: string }> {
         const story = await this.prisma.story.findUnique({ where: { slug } });
-        if (!story) throw new Error(`Story not found: ${slug}`);
+        if (!story) {
+            throw new HttpException(
+                `Không tìm thấy truyện: ${slug}`,
+                HttpStatus.NOT_FOUND,
+            );
+        }
         return { title: story.title, text: this.stripHtml(story.content) };
     }
 
-    async summarize(slug: string): Promise<{ summary: string; moral: string }> {
-        if (!this.ai) throw new Error('AI not configured. Set GEMINI_API_KEY.');
+    private async callGemini(prompt: string, retries = 2): Promise<string> {
+        if (!this.ai) {
+            throw new HttpException(
+                'AI chưa được cấu hình. Hãy set GEMINI_API_KEY.',
+                HttpStatus.SERVICE_UNAVAILABLE,
+            );
+        }
 
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const response = await this.ai.models.generateContent({
+                    model: 'gemini-2.0-flash',
+                    contents: prompt,
+                });
+                return response.text || '';
+            } catch (error: any) {
+                const status = error?.status || error?.statusCode;
+                this.logger.error(
+                    `Gemini API error (attempt ${attempt + 1}/${retries + 1}): status=${status}, message=${error?.message}`,
+                );
+
+                if (status === 429 && attempt < retries) {
+                    // Rate limited — wait and retry
+                    const delay = (attempt + 1) * 3000;
+                    this.logger.warn(`Rate limited. Waiting ${delay}ms before retry...`);
+                    await new Promise((r) => setTimeout(r, delay));
+                    continue;
+                }
+
+                if (status === 429) {
+                    throw new HttpException(
+                        'AI đang bận (rate limit). Vui lòng thử lại sau 1 phút.',
+                        HttpStatus.TOO_MANY_REQUESTS,
+                    );
+                }
+                if (status === 403) {
+                    throw new HttpException(
+                        'API key không hợp lệ hoặc chưa kích hoạt Gemini API.',
+                        HttpStatus.FORBIDDEN,
+                    );
+                }
+                throw new HttpException(
+                    `Lỗi AI: ${error?.message || 'Unknown error'}`,
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                );
+            }
+        }
+        throw new HttpException('AI không phản hồi', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    async summarize(slug: string): Promise<{ summary: string; moral: string }> {
         const { title, text } = await this.getStoryContent(slug);
         const truncated = text.substring(0, 8000);
 
-        const response = await this.ai.models.generateContent({
-            model: 'gemini-2.0-flash',
-            contents: `Bạn là chuyên gia về truyện cổ tích. Hãy tóm tắt câu truyện "${title}" bằng tiếng Việt.
+        const rawText = await this.callGemini(
+            `Bạn là chuyên gia về truyện cổ tích. Hãy tóm tắt câu truyện "${title}" bằng tiếng Việt.
 
 Nội dung truyện:
 ${truncated}
@@ -57,17 +109,13 @@ Trả về JSON theo format sau (KHÔNG markdown, chỉ JSON thuần):
   "summary": "Tóm tắt ngắn gọn 3-5 câu, giữ nội dung chính",
   "moral": "Bài học đạo đức / ý nghĩa của câu truyện trong 1-2 câu"
 }`,
-        });
+        );
 
         try {
-            const raw = response.text?.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim() || '';
-            return JSON.parse(raw);
+            const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            return JSON.parse(cleaned);
         } catch {
-            this.logger.error('Failed to parse summarize response');
-            return {
-                summary: response.text || 'Không thể tóm tắt truyện.',
-                moral: '',
-            };
+            return { summary: rawText, moral: '' };
         }
     }
 
@@ -78,14 +126,11 @@ Trả về JSON theo format sau (KHÔNG markdown, chỉ JSON thuần):
             correctAnswer: number;
         }>;
     }> {
-        if (!this.ai) throw new Error('AI not configured. Set GEMINI_API_KEY.');
-
         const { title, text } = await this.getStoryContent(slug);
         const truncated = text.substring(0, 8000);
 
-        const response = await this.ai.models.generateContent({
-            model: 'gemini-2.0-flash',
-            contents: `Bạn là giáo viên dạy văn học. Hãy tạo 5 câu hỏi trắc nghiệm bằng tiếng Việt về câu truyện "${title}".
+        const rawText = await this.callGemini(
+            `Bạn là giáo viên dạy văn học. Hãy tạo 5 câu hỏi trắc nghiệm bằng tiếng Việt về câu truyện "${title}".
 
 Nội dung truyện:
 ${truncated}
@@ -106,13 +151,12 @@ Yêu cầu:
 - correctAnswer là index (0-3) của đáp án đúng
 - Câu hỏi từ dễ đến khó
 - Bao gồm câu hỏi về nhân vật, cốt truyện, và bài học`,
-        });
+        );
 
         try {
-            const raw = response.text?.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim() || '';
-            return JSON.parse(raw);
+            const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            return JSON.parse(cleaned);
         } catch {
-            this.logger.error('Failed to parse quiz response');
             return { questions: [] };
         }
     }
