@@ -1,0 +1,36 @@
+[
+    {
+        "domain": "truyencotich.vn",
+        "name": "Truyện Cổ Tích VN",
+        "baseUrl": "https://truyencotich.vn",
+        "dnsIp": "103.77.162.39",
+        "categories": [
+            {
+                "name": "Cổ tích Việt Nam",
+                "slug": "co-tich-viet-nam",
+                "url": "https://truyencotich.vn/danh-muc/truyen-co-tich/co-tich-viet-nam"
+            },
+            {
+                "name": "Cổ tích Thế giới",
+                "slug": "co-tich-the-gioi",
+                "url": "https://truyencotich.vn/danh-muc/truyen-co-tich/co-tich-the-gioi"
+            }
+        ],
+        "selectors": {
+            "storyLinks": "article h2 a, .post-title a, h2.post-box-title a, .post-listing .post-box-title a, .all-posts-title a, .entry-title a",
+            "storyLinksFallback": "#main-content a[href*='.html'], .main-content a[href*='.html']",
+            "pagination": "a.next, a[rel='next'], .pages a:last-child",
+            "paginationOlder": "a:contains('Older'), .older-posts a, .nav-previous a",
+            "title": "h1.post-title, h1.entry-title, .post-header h1, article h1",
+            "content": ".entry-content, .post-content, .entry, article .content, .post-inner .entry",
+            "thumbnail": "meta[property='og:image']",
+            "tags": ".post-tags a, .tagcloud a, .tags a, a[rel='tag'], .post-tag a",
+            "removeFromContent": "script, style, .social-share, .post-tags, .related-posts, .comments, .navigation, ins, .adsbygoogle"
+        },
+        "storyUrlPattern": ".html",
+        "storyUrlExclude": [
+            "danh-muc",
+            "tag/"
+        ]
+    }
+]

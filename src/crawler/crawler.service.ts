@@ -3,7 +3,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import * as https from 'https';
 import * as dns from 'dns';
+import * as fs from 'fs';
+import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+
+// ─── Interfaces ───────────────────────────────────────────
 
 interface CrawledStory {
     title: string;
@@ -21,46 +25,100 @@ interface CategoryConfig {
     url: string;
 }
 
-const CATEGORIES: CategoryConfig[] = [
-    {
-        name: 'Cổ tích Việt Nam',
-        slug: 'co-tich-viet-nam',
-        url: 'https://truyencotich.vn/danh-muc/truyen-co-tich/co-tich-viet-nam',
-    },
-    {
-        name: 'Cổ tích Thế giới',
-        slug: 'co-tich-the-gioi',
-        url: 'https://truyencotich.vn/danh-muc/truyen-co-tich/co-tich-the-gioi',
-    },
-];
+interface SourceSelectors {
+    storyLinks: string;
+    storyLinksFallback?: string;
+    pagination: string;
+    paginationOlder?: string;
+    title: string;
+    content: string;
+    thumbnail: string;
+    tags: string;
+    removeFromContent: string;
+}
+
+interface CrawlSource {
+    domain: string;
+    name: string;
+    baseUrl: string;
+    dnsIp?: string;
+    categories: CategoryConfig[];
+    selectors: SourceSelectors;
+    storyUrlPattern: string;
+    storyUrlExclude?: string[];
+}
+
+// ─── Dynamic DNS ──────────────────────────────────────────
+
+function loadSources(): CrawlSource[] {
+    // Try multiple paths: dist (prod) and src (dev)
+    const candidates = [
+        path.join(__dirname, 'sources.json'),
+        path.join(process.cwd(), 'src', 'crawler', 'sources.json'),
+        path.join(process.cwd(), 'dist', 'src', 'crawler', 'sources.json'),
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) {
+            const raw = fs.readFileSync(p, 'utf-8');
+            return JSON.parse(raw);
+        }
+    }
+    throw new Error(
+        `sources.json not found. Tried: ${candidates.join(', ')}`,
+    );
+}
+
+function buildDnsMap(sources: CrawlSource[]): Record<string, string> {
+    const map: Record<string, string> = {};
+    for (const src of sources) {
+        if (src.dnsIp) {
+            map[src.domain] = src.dnsIp;
+        }
+    }
+    return map;
+}
+
+function createCustomLookup(dnsMap: Record<string, string>) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (hostname: string, options: any, callback: any) => {
+        if (dnsMap[hostname]) {
+            const ip = dnsMap[hostname];
+            if (typeof options === 'function') {
+                options(null, ip, 4);
+            } else if (options?.all) {
+                callback(null, [{ address: ip, family: 4 }]);
+            } else {
+                callback(null, ip, 4);
+            }
+        } else {
+            dns.lookup(hostname, options, callback);
+        }
+    };
+}
 
 const DELAY_MS = 500;
 
-// Custom DNS lookup to resolve truyencotich.vn
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const customLookup = (hostname: string, options: any, callback: any) => {
-    if (hostname === 'truyencotich.vn') {
-        if (typeof options === 'function') {
-            options(null, '103.77.162.39', 4);
-        } else if (options?.all) {
-            callback(null, [{ address: '103.77.162.39', family: 4 }]);
-        } else {
-            callback(null, '103.77.162.39', 4);
-        }
-    } else {
-        dns.lookup(hostname, options, callback);
-    }
-};
+// ─── Service ──────────────────────────────────────────────
 
 @Injectable()
 export class CrawlerService {
     private readonly logger = new Logger(CrawlerService.name);
-    private readonly httpsAgent = new https.Agent({
-        rejectUnauthorized: false,
-        lookup: customLookup,
-    });
+    private readonly sources: CrawlSource[];
+    private readonly httpsAgent: https.Agent;
 
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(private readonly prisma: PrismaService) {
+        this.sources = loadSources();
+        const dnsMap = buildDnsMap(this.sources);
+        this.httpsAgent = new https.Agent({
+            rejectUnauthorized: false,
+            lookup: createCustomLookup(dnsMap),
+        });
+        this.logger.log(
+            `Loaded ${this.sources.length} crawl source(s): ${this.sources.map((s) => s.domain).join(', ')}`,
+        );
+    }
+
+    // ─── Helpers ────────────────────────────────────────────
 
     private delay(ms: number): Promise<void> {
         return new Promise((resolve) => setTimeout(resolve, ms));
@@ -79,93 +137,75 @@ export class CrawlerService {
         return data;
     }
 
-    /**
-     * Crawl a category listing page and return all story URLs.
-     * Follows pagination links (page/2, page/3, etc.)
-     */
-    async crawlCategoryPages(categoryUrl: string): Promise<string[]> {
+    private resolveUrl(href: string, baseUrl: string): string {
+        if (href.startsWith('http')) return href;
+        if (href.startsWith('/')) return `${baseUrl}${href}`;
+        return `${baseUrl}/${href}`;
+    }
+
+    // ─── Category Crawling ──────────────────────────────────
+
+    async crawlCategoryPages(
+        categoryUrl: string,
+        source: CrawlSource,
+    ): Promise<string[]> {
         const storyUrls: string[] = [];
         let currentUrl: string | null = categoryUrl;
+        const { selectors, storyUrlPattern, storyUrlExclude = [] } = source;
 
         while (currentUrl) {
             this.logger.log(`Crawling category page: ${currentUrl}`);
             const html = await this.fetchHtml(currentUrl);
             const $ = cheerio.load(html);
 
-            // Extract story links from article titles
-            $('article h2 a, .post-title a, h2.post-box-title a').each((_, el) => {
+            // Extract story links using configured selectors
+            $(selectors.storyLinks).each((_, el) => {
                 const href = $(el).attr('href');
-                if (href && href.includes('.html')) {
-                    const fullUrl = href.startsWith('http')
-                        ? href
-                        : `https://truyencotich.vn${href}`;
+                if (href && href.includes(storyUrlPattern)) {
+                    const fullUrl = this.resolveUrl(href, source.baseUrl);
                     if (!storyUrls.includes(fullUrl)) {
                         storyUrls.push(fullUrl);
                     }
                 }
             });
 
-            // Also try broader selectors for story links
-            $(
-                '.post-listing .post-box-title a, .all-posts-title a, .entry-title a',
-            ).each((_, el) => {
-                const href = $(el).attr('href');
-                if (href && href.includes('.html')) {
-                    const fullUrl = href.startsWith('http')
-                        ? href
-                        : `https://truyencotich.vn${href}`;
-                    if (!storyUrls.includes(fullUrl)) {
-                        storyUrls.push(fullUrl);
-                    }
-                }
-            });
-
-            // If selectors above don't work, try getting all links within the main content
-            if (storyUrls.length === 0) {
-                $(
-                    '#main-content a[href*=".html"], .main-content a[href*=".html"], #tie-wrapper a[href*="truyen-co-tich"]',
-                ).each((_, el) => {
+            // Fallback selectors
+            if (storyUrls.length === 0 && selectors.storyLinksFallback) {
+                $(selectors.storyLinksFallback).each((_, el) => {
                     const href = $(el).attr('href');
-                    if (
-                        href &&
-                        href.includes('.html') &&
-                        !href.includes('danh-muc') &&
-                        !href.includes('tag/')
-                    ) {
-                        const fullUrl = href.startsWith('http')
-                            ? href
-                            : `https://truyencotich.vn${href}`;
-                        if (!storyUrls.includes(fullUrl)) {
-                            storyUrls.push(fullUrl);
+                    if (href && href.includes(storyUrlPattern)) {
+                        const excluded = storyUrlExclude.some((ex) =>
+                            href.includes(ex),
+                        );
+                        if (!excluded) {
+                            const fullUrl = this.resolveUrl(href, source.baseUrl);
+                            if (!storyUrls.includes(fullUrl)) {
+                                storyUrls.push(fullUrl);
+                            }
                         }
                     }
                 });
             }
 
-            // Check for next page link
-            const nextLink = $('a.next, a[rel="next"], .pages a:last-child').attr(
-                'href',
-            );
+            // Check for next page
+            const nextLink = $(selectors.pagination).attr('href');
             if (
                 nextLink &&
                 nextLink !== currentUrl &&
                 nextLink.includes('/page/')
             ) {
-                currentUrl = nextLink.startsWith('http')
-                    ? nextLink
-                    : `https://truyencotich.vn${nextLink}`;
+                currentUrl = this.resolveUrl(nextLink, source.baseUrl);
                 await this.delay(DELAY_MS);
-            } else {
-                // Also try "← Older posts" style links
-                const olderLink = $('a:contains("Older"), a:contains("older"), .older-posts a, .nav-previous a').attr('href');
+            } else if (selectors.paginationOlder) {
+                const olderLink = $(selectors.paginationOlder).attr('href');
                 if (olderLink && olderLink !== currentUrl) {
-                    currentUrl = olderLink.startsWith('http')
-                        ? olderLink
-                        : `https://truyencotich.vn${olderLink}`;
+                    currentUrl = this.resolveUrl(olderLink, source.baseUrl);
                     await this.delay(DELAY_MS);
                 } else {
                     currentUrl = null;
                 }
+            } else {
+                currentUrl = null;
             }
         }
 
@@ -173,20 +213,20 @@ export class CrawlerService {
         return storyUrls;
     }
 
-    /**
-     * Crawl a single story page and extract content.
-     */
-    async crawlStoryPage(url: string): Promise<CrawledStory | null> {
+    // ─── Story Crawling ─────────────────────────────────────
+
+    async crawlStoryPage(
+        url: string,
+        source: CrawlSource,
+    ): Promise<CrawledStory | null> {
         try {
             const html = await this.fetchHtml(url);
             const $ = cheerio.load(html);
+            const { selectors } = source;
 
-            // Extract title
+            // Title
             const title =
-                $('h1.post-title, h1.entry-title, .post-header h1, article h1')
-                    .first()
-                    .text()
-                    .trim() ||
+                $(selectors.title).first().text().trim() ||
                 $('h1').first().text().trim() ||
                 $('title').text().replace(/ - .*$/, '').trim();
 
@@ -195,16 +235,9 @@ export class CrawlerService {
                 return null;
             }
 
-            // Extract content
-            const contentEl = $(
-                '.entry-content, .post-content, .entry, article .content, .post-inner .entry',
-            ).first();
-
-            // Remove unwanted elements
-            contentEl.find(
-                'script, style, .social-share, .post-tags, .related-posts, .comments, .navigation, ins, .adsbygoogle',
-            ).remove();
-
+            // Content
+            const contentEl = $(selectors.content).first();
+            contentEl.find(selectors.removeFromContent).remove();
             const content = contentEl.html()?.trim() || '';
 
             if (!content) {
@@ -212,139 +245,143 @@ export class CrawlerService {
                 return null;
             }
 
-            // Extract excerpt (first paragraph text)
+            // Excerpt
             const excerpt =
                 contentEl.find('p').first().text().trim().substring(0, 300) || '';
 
-            // Extract thumbnail
+            // Thumbnail
             const thumbnail =
-                $('meta[property="og:image"]').attr('content') ||
+                $(selectors.thumbnail).attr('content') ||
                 contentEl.find('img').first().attr('src') ||
                 null;
 
-            // Extract tags
+            // Tags
             const tags: string[] = [];
-            $(
-                '.post-tags a, .tagcloud a, .tags a, a[rel="tag"], .post-tag a',
-            ).each((_, el) => {
+            $(selectors.tags).each((_, el) => {
                 const tag = $(el).text().trim();
                 if (tag) tags.push(tag);
             });
 
-            // Generate slug from URL
-            const slug = url
-                .replace(/\.html$/, '')
-                .split('/')
-                .pop() || '';
+            // Slug from URL
+            const slug =
+                url
+                    .replace(/\.html$/, '')
+                    .replace(/\/$/, '')
+                    .split('/')
+                    .pop() || '';
 
-            return {
-                title,
-                slug,
-                excerpt,
-                content,
-                thumbnail,
-                tags,
-                sourceUrl: url,
-            };
+            return { title, slug, excerpt, content, thumbnail, tags, sourceUrl: url };
         } catch (error) {
             this.logger.error(`Failed to crawl story: ${url}`, error);
             return null;
         }
     }
 
-    /**
-     * Run full crawl: all categories → all stories → save to DB
-     */
-    async crawlAll(): Promise<{
-        totalCategories: number;
-        totalStories: number;
-        newStories: number;
-        errors: number;
-    }> {
+    // ─── Save Story ─────────────────────────────────────────
+
+    private async saveStory(
+        story: CrawledStory,
+        categoryId: string,
+    ): Promise<boolean> {
+        try {
+            await this.prisma.story.create({
+                data: {
+                    title: story.title,
+                    slug: story.slug,
+                    excerpt: story.excerpt,
+                    content: story.content,
+                    thumbnail: story.thumbnail,
+                    tags: story.tags,
+                    sourceUrl: story.sourceUrl,
+                    categoryId,
+                },
+            });
+            this.logger.log(`✅ Saved: ${story.title}`);
+            return true;
+        } catch {
+            // Slug or sourceUrl conflict → try with suffix
+            try {
+                await this.prisma.story.create({
+                    data: {
+                        ...story,
+                        slug: `${story.slug}-${Date.now()}`,
+                        categoryId,
+                    },
+                });
+                this.logger.log(`✅ Saved (suffix): ${story.title}`);
+                return true;
+            } catch (finalError) {
+                this.logger.error(`❌ Failed to save: ${story.title}`, finalError);
+                return false;
+            }
+        }
+    }
+
+    // ─── Crawl One Source ────────────────────────────────────
+
+    async crawlSource(source: CrawlSource) {
+        this.logger.log(`\n========== Crawling: ${source.name} (${source.domain}) ==========`);
         let totalStories = 0;
         let newStories = 0;
         let errors = 0;
 
-        for (const cat of CATEGORIES) {
-            this.logger.log(`=== Crawling category: ${cat.name} ===`);
+        for (const cat of source.categories) {
+            this.logger.log(`--- Category: ${cat.name} ---`);
 
-            // Upsert category
             const category = await this.prisma.category.upsert({
                 where: { slug: cat.slug },
                 create: { name: cat.name, slug: cat.slug },
                 update: { name: cat.name },
             });
 
-            // Get all story URLs
-            const storyUrls = await this.crawlCategoryPages(cat.url);
+            const storyUrls = await this.crawlCategoryPages(cat.url, source);
             totalStories += storyUrls.length;
 
             for (const url of storyUrls) {
-                // Check if already crawled
                 const existing = await this.prisma.story.findUnique({
                     where: { sourceUrl: url },
                 });
-
-                if (existing) {
-                    this.logger.debug(`Skipping (already exists): ${url}`);
-                    continue;
-                }
+                if (existing) continue;
 
                 await this.delay(DELAY_MS);
-                const story = await this.crawlStoryPage(url);
-
+                const story = await this.crawlStoryPage(url, source);
                 if (!story) {
                     errors++;
                     continue;
                 }
 
-                try {
-                    await this.prisma.story.create({
-                        data: {
-                            title: story.title,
-                            slug: story.slug,
-                            excerpt: story.excerpt,
-                            content: story.content,
-                            thumbnail: story.thumbnail,
-                            tags: story.tags,
-                            sourceUrl: story.sourceUrl,
-                            categoryId: category.id,
-                        },
-                    });
-                    newStories++;
-                    this.logger.log(`✅ Saved: ${story.title}`);
-                } catch (dbError) {
-                    // Handle slug conflicts by appending a random suffix
-                    try {
-                        await this.prisma.story.create({
-                            data: {
-                                title: story.title,
-                                slug: `${story.slug}-${Date.now()}`,
-                                excerpt: story.excerpt,
-                                content: story.content,
-                                thumbnail: story.thumbnail,
-                                tags: story.tags,
-                                sourceUrl: story.sourceUrl,
-                                categoryId: category.id,
-                            },
-                        });
-                        newStories++;
-                        this.logger.log(`✅ Saved (with suffix): ${story.title}`);
-                    } catch (finalError) {
-                        errors++;
-                        this.logger.error(`❌ Failed to save: ${story.title}`, finalError);
-                    }
-                }
+                const saved = await this.saveStory(story, category.id);
+                if (saved) newStories++;
+                else errors++;
             }
         }
 
-        const result = {
-            totalCategories: CATEGORIES.length,
-            totalStories,
-            newStories,
-            errors,
+        return { source: source.domain, totalStories, newStories, errors };
+    }
+
+    // ─── Crawl All Sources ──────────────────────────────────
+
+    async crawlAll() {
+        const results = [];
+        for (const source of this.sources) {
+            const result = await this.crawlSource(source);
+            results.push(result);
+        }
+
+        const summary = {
+            totalSources: this.sources.length,
+            totalStories: results.reduce((s, r) => s + r.totalStories, 0),
+            newStories: results.reduce((s, r) => s + r.newStories, 0),
+            errors: results.reduce((s, r) => s + r.errors, 0),
+            details: results,
         };
-        this.logger.log(`=== Crawl complete ===`, result);
-        return result;
+        this.logger.log(`=== Crawl complete ===`, summary);
+        return summary;
+    }
+
+    // ─── Get Sources (for API) ──────────────────────────────
+
+    getSources(): CrawlSource[] {
+        return this.sources;
     }
 }
