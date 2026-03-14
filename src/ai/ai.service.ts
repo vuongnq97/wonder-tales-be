@@ -55,7 +55,7 @@ export class AiService {
         for (let attempt = 0; attempt <= retries; attempt++) {
             try {
                 const response = await this.ai.models.generateContent({
-                    model: 'gemini-2.0-flash',
+                    model: 'gemini-2.5-flash',
                     contents: prompt,
                 });
                 return response.text || '';
